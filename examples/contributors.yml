@@ -3,43 +3,38 @@
 #   <!-- readme: contributors,bots/- -start -->
 #   <!-- readme: contributors,bots/- -end -->
 #
-# Pin the Action to a commit SHA when the job has contents: write.
-# Protected default branches should open a pull request instead of pushing
-# (see the py-harness contributors.yml pattern).
+# Save as .github/workflows/contributors.yml. It calls the reusable wall,
+# which writes the refreshed wall straight to the default branch after every
+# merge — no separate pull request, and no bot PR in the history.
+#
+# Unprotected default branch: nothing else to do.
+#
+# Protected default branch: add a write deploy key to the repository, store
+# its private half as the secret CONTRIBUTORS_DEPLOY_KEY, and let deploy keys
+# bypass the branch ruleset. `secrets: inherit` hands it to the wall — but only
+# when this repository is in the same organisation or account as the workflow.
+# Anywhere else, replace `secrets: inherit` with:
+#
+#   secrets:
+#     CONTRIBUTORS_DEPLOY_KEY: ${{ secrets.CONTRIBUTORS_DEPLOY_KEY }}
+#
+# Do not add a pull_request trigger. A wall drawn on a pull request branch is
+# stale by the time it merges if anything else merged first, and a fork's pull
+# request cannot run it at all; the reusable wall skips pull request events.
 
 name: Contributors
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "17 4 * * 0"
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
 
 jobs:
-  readme:
-    if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: true
-
-      - uses: YauhenBichel/readme-contributors@v1.5.1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # layout: tiles
-          # theme: midnight
-
-      - name: Push the list
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add README.md .github/contributors.svg .github/faces
-          git diff --cached --quiet && exit 0
-          git commit -m "docs: refresh README contributors"
-          git push
+  wall:
+    uses: YauhenBichel/readme-contributors/.github/workflows/wall.yml@v1
+    secrets: inherit

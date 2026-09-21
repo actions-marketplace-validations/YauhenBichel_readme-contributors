@@ -10,19 +10,44 @@ drawing; they do not change who is listed.
 from __future__ import annotations
 
 import base64
+import html
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Mapping
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 API = "https://api.github.com"
 AVATARS = "https://avatars.githubusercontent.com"
 DEFAULT_START = "<!-- readme: contributors,bots/- -start -->"
 DEFAULT_END = "<!-- readme: contributors,bots/- -end -->"
+EMPTY_WALL = "Be the first to appear here."
+GITHUB_MODELS_URL = "https://models.github.ai/inference"
+_COAUTHOR_LINE = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]+(.+)$")
+_GITHUB_NOREPLY = re.compile(
+    r"(?:(?P<id>\d+)\+)?(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
+    r"@users\.noreply\.github\.com$",
+    re.I,
+)
+# A merged pull request's body stays editable by its author: cap what it can add.
+MAX_COAUTHORS = 5
+_CAPTION_EM = re.compile(r"<em>(.*?)</em>", re.I | re.S)
+_WALL_HREF = re.compile(r'href="https://github.com/([^"#?]+)"', re.I)
+_UNSAFE = (
+    "nsfw",
+    "porn",
+    "sex",
+    "nude",
+    "xxx",
+    "kill yourself",
+    "kys",
+    "suicide",
+)
 # 1x1 PNG used only when a test injects a known image.
 TINY_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -137,14 +162,241 @@ def _get(url: str, token: str) -> object:
 
 def _bytes(url: str, token: str) -> bytes:
     headers = {"User-Agent": "readme-contributors-action"}
-    if token:
+    # Avatars need no token, and urllib would keep it across a redirect to any host.
+    if token and urlsplit(url).hostname == urlsplit(API).hostname:
         headers["Authorization"] = f"Bearer {token}"
     req = Request(url, headers=headers)
     with urlopen(req, timeout=20) as resp:
         return resp.read()
 
 
-def list_people(repo: str, token: str, limit: int = 48) -> list[dict[str, str]]:
+def is_human_login(login: str, kind: str = "") -> bool:
+    if not (login or "").strip():
+        return False
+    if (kind or "").lower() == "bot":
+        return False
+    return not login.lower().endswith("[bot]")
+
+
+def parse_exclude(raw: str) -> frozenset[str]:
+    return frozenset(
+        part.strip().lower() for part in (raw or "").split(",") if part.strip()
+    )
+
+
+def is_excluded(login: str, blocked: frozenset[str]) -> bool:
+    return (login or "").strip().lower() in blocked
+
+
+def parse_coauthor_logins(*texts: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    blob = "\n".join(text or "" for text in texts)
+    for match in _COAUTHOR_LINE.finditer(blob):
+        login = _coauthor_login(match.group(1))
+        key = login.lower()
+        if not login or key in seen or not is_human_login(login):
+            continue
+        seen.add(key)
+        found.append(login)
+        if len(found) == MAX_COAUTHORS:
+            break
+    return found
+
+
+def _coauthor_login(rest: str) -> str:
+    raw = (rest or "").strip()
+    name_part = raw.split("<", 1)[0].strip()
+    if not is_human_login(name_part):
+        return ""
+    # Only Git's trailer form with a GitHub noreply address names a login. A bare
+    # login in a pull request body put anyone at all on the wall.
+    email_match = re.search(r"<([^>]+)>", raw)
+    if not email_match:
+        return ""
+    noreply = _GITHUB_NOREPLY.search(email_match.group(1).strip())
+    return noreply.group("login") if noreply else ""
+
+
+def merge_people(
+    people: list[dict[str, str]],
+    extras: list[dict[str, str]],
+    limit: int,
+    exclude: str = "",
+) -> list[dict[str, str]]:
+    """Append unique humans from extras without growing past limit."""
+    blocked = parse_exclude(exclude)
+    seen = {person["login"].lower() for person in people}
+    out = [person for person in people if not is_excluded(person["login"], blocked)]
+    for extra in extras:
+        if len(out) >= limit:
+            break
+        login = str(extra.get("login") or "").strip()
+        kind = str(extra.get("type") or "")
+        if (
+            not is_human_login(login, kind)
+            or login.lower() in seen
+            or is_excluded(login, blocked)
+        ):
+            continue
+        seen.add(login.lower())
+        name = str(extra.get("name") or "").strip() or login
+        out.append({"login": login, "name": name})
+    return out
+
+
+def trigger_people(
+    actor: str = "",
+    event: Mapping[str, object] | None = None,
+) -> list[dict[str, str]]:
+    """Authors of the commit or pull request that triggered this job."""
+    extras: list[dict[str, str]] = []
+    if actor.strip():
+        extras.append({"login": actor.strip(), "name": actor.strip()})
+    if not isinstance(event, Mapping):
+        return extras
+
+    def _add_user(user: object) -> None:
+        if not isinstance(user, Mapping):
+            return
+        login = str(user.get("login") or user.get("username") or "").strip()
+        if not login:
+            return
+        extras.append(
+            {
+                "login": login,
+                "name": str(user.get("name") or login),
+                "type": str(user.get("type") or ""),
+            }
+        )
+
+    pull = event.get("pull_request")
+    if isinstance(pull, Mapping):
+        _add_user(pull.get("user"))
+
+    head = event.get("head_commit")
+    if isinstance(head, Mapping):
+        _add_user(head.get("author"))
+
+    commits = event.get("commits")
+    if isinstance(commits, list):
+        for row in commits:
+            if isinstance(row, Mapping):
+                _add_user(row.get("author"))
+    return extras
+
+
+def load_event(path: str = "") -> dict[str, object]:
+    raw = (path or os.environ.get("GITHUB_EVENT_PATH", "")).strip()
+    if not raw:
+        return {}
+    file = Path(raw)
+    if not file.is_file():
+        return {}
+    data = json.loads(file.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def merged_pr_people(rows: object) -> list[dict[str, str]]:
+    extras: list[dict[str, str]] = []
+    if not isinstance(rows, list):
+        return extras
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("merged_at"):
+            continue
+        user = row.get("user")
+        if isinstance(user, dict):
+            login = str(user.get("login") or "").strip()
+            if login:
+                extras.append(
+                    {
+                        "login": login,
+                        "name": str(user.get("name") or login),
+                        "type": str(user.get("type") or ""),
+                    }
+                )
+        for login in parse_coauthor_logins(str(row.get("body") or "")):
+            extras.append({"login": login, "name": login, "type": "User"})
+    return extras
+
+
+def _person_from_login(login: str, token: str, kind: str = "") -> dict[str, str] | None:
+    if not is_human_login(login, kind):
+        return None
+    try:
+        profile = _get(f"{API}/users/{login}", token)
+    except HTTPError as exc:
+        # A login someone typed that does not exist. Skipping it keeps the wall
+        # updating; any other error still fails the run rather than shrink it.
+        if exc.code != 404:
+            raise
+        print(f"skipped unknown login {login}", file=sys.stderr)
+        return None
+    name = login
+    if isinstance(profile, dict):
+        if str(profile.get("type") or "").lower() == "bot":
+            return None
+        if profile.get("name"):
+            name = str(profile["name"])
+    return {"login": login, "name": name}
+
+
+def _append_resolved(
+    people: list[dict[str, str]],
+    extras: list[dict[str, str]],
+    token: str,
+    limit: int,
+    exclude: str = "",
+) -> list[dict[str, str]]:
+    blocked = parse_exclude(exclude)
+    pending: list[dict[str, str]] = []
+    seen = {person["login"].lower() for person in people}
+    for extra in extras:
+        if len(people) + len(pending) >= limit:
+            break
+        login = str(extra.get("login") or "").strip()
+        kind = str(extra.get("type") or "")
+        if (
+            not is_human_login(login, kind)
+            or login.lower() in seen
+            or is_excluded(login, blocked)
+        ):
+            continue
+        person = _person_from_login(login, token, kind)
+        if person is None:
+            continue
+        seen.add(login.lower())
+        pending.append(person)
+    return people + pending
+
+
+def list_merged_pr_authors(
+    repo: str, token: str, limit: int
+) -> list[dict[str, str]]:
+    extras: list[dict[str, str]] = []
+    seen: set[str] = set()
+    page = 1
+    while len(seen) < limit:
+        rows = _get(
+            f"{API}/repos/{repo}/pulls?state=closed&per_page=100&page={page}",
+            token,
+        )
+        batch = merged_pr_people(rows)
+        extras.extend(batch)
+        for extra in batch:
+            login = str(extra.get("login") or "").strip().lower()
+            if login:
+                seen.add(login)
+        if not isinstance(rows, list) or len(rows) < 100:
+            break
+        page += 1
+    return extras
+
+
+def list_people(
+    repo: str, token: str, limit: int = 100, exclude: str = ""
+) -> list[dict[str, str]]:
+    blocked = parse_exclude(exclude)
     people: list[dict[str, str]] = []
     page = 1
     while len(people) < limit:
@@ -161,17 +413,21 @@ def list_people(repo: str, token: str, limit: int = 48) -> list[dict[str, str]]:
                 continue
             login = str(row.get("login") or "")
             kind = str(row.get("type") or "")
-            if not login or kind == "Bot" or login.endswith("[bot]"):
+            if is_excluded(login, blocked):
                 continue
-            profile = _get(f"{API}/users/{login}", token)
-            name = login
-            if isinstance(profile, dict) and profile.get("name"):
-                name = str(profile["name"])
-            people.append({"login": login, "name": name})
+            person = _person_from_login(login, token, kind)
+            if person is None:
+                continue
+            people.append(person)
         if len(rows) < 100:
             break
         page += 1
-    return people
+    extras = trigger_people(
+        os.environ.get("GITHUB_ACTOR", ""),
+        load_event(),
+    )
+    extras.extend(list_merged_pr_authors(repo, token, limit))
+    return _append_resolved(people, extras, token, limit, exclude)
 
 
 def fetch_avatars(
@@ -221,11 +477,35 @@ def _data_uri(payload: bytes) -> str:
 
 
 def parse_layout(raw: str) -> str:
-    name = (raw or "facepile").strip().lower() or "facepile"
+    name = (raw or "auto").strip().lower() or "auto"
+    if name == "auto":
+        return "auto"
     if name not in LAYOUTS:
-        allowed = ", ".join(LAYOUTS)
+        allowed = "auto, " + ", ".join(LAYOUTS)
         raise SystemExit(f"layout must be one of: {allowed}")
     return name
+
+
+def fit_layout(layout: str, count: int) -> str:
+    """Pages SVG. auto picks a layout that still shows every face."""
+    chosen = parse_layout(layout)
+    if chosen != "auto":
+        return chosen
+    if count <= 8:
+        return "facepile"
+    if count <= 24:
+        return "grid"
+    return "compact"
+
+
+def fit_readme_size(count: int, size: int) -> int:
+    """README polaroids shrink so a long list still wraps on GitHub."""
+    size = max(32, size)
+    if count <= 20:
+        return size
+    if count <= 50:
+        return min(size, 48)
+    return min(size, 36)
 
 
 def parse_theme(raw: str) -> str:
@@ -266,12 +546,26 @@ def _theme_css(theme: Mapping[str, str]) -> list[str]:
     return lines
 
 
+def parse_overlap(raw: str = "") -> float:
+    text = (raw or "").strip()
+    if not text:
+        return 0.64
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise SystemExit("overlap must be a number") from exc
+    if value <= 0:
+        raise SystemExit("overlap must be greater than 0")
+    return value
+
+
 def _placements(
     layout: str,
     count: int,
     size: int,
     columns: int,
     framed: bool,
+    overlap: float = 0.64,
 ) -> tuple[int, int, list[tuple[int, float, float, int]]]:
     """Return canvas size and (index, x, y, face_size) for each person."""
     columns = max(1, columns)
@@ -282,7 +576,7 @@ def _placements(
 
     if layout == "facepile":
         pad = 10 if framed else 4
-        step = int(size * 0.64)
+        step = int(size * overlap)
         row_gap = 14
         rows = (count + columns - 1) // columns
         widest = min(columns, count)
@@ -586,9 +880,10 @@ def render_svg(
     columns: int = 8,
     layout: str = "facepile",
     theme: str = "auto",
+    overlap: float = 0.64,
 ) -> str:
     """Draw the wall. Each face is a link to that person's GitHub profile."""
-    layout = parse_layout(layout)
+    layout = fit_layout(layout, len(people))
     theme_name = parse_theme(theme)
     palette = THEMES[theme_name]
     if not people:
@@ -599,7 +894,7 @@ def render_svg(
     pictures = avatars or {}
     framed = bool(palette.get("bg"))
     width, height, spots = _placements(
-        layout, len(people), size, columns, framed
+        layout, len(people), size, columns, framed, overlap
     )
     names = ", ".join(person["name"] for person in people)
     defs: list[str] = _theme_css(palette)
@@ -828,6 +1123,20 @@ def write_faces(
             ),
             encoding="utf-8",
         )
+    prune_faces(directory, people)
+
+
+def _kept_face_names(people: list[dict[str, str]]) -> set[str]:
+    return {_face_file(person["login"]) for person in people}
+
+
+def prune_faces(directory: Path, people: list[dict[str, str]]) -> None:
+    if not directory.is_dir():
+        return
+    keep = _kept_face_names(people)
+    for path in directory.glob("*.svg"):
+        if path.name not in keep:
+            path.unlink()
 
 
 def faces_current(
@@ -837,6 +1146,13 @@ def faces_current(
     *,
     size: int = 72,
 ) -> bool:
+    keep = _kept_face_names(people)
+    if directory.is_dir():
+        leftover = [path for path in directory.glob("*.svg") if path.name not in keep]
+        if leftover:
+            return False
+    elif people:
+        return False
     pictures = avatars or {}
     for index, person in enumerate(people):
         path = directory / _face_file(person["login"])
@@ -861,7 +1177,7 @@ def render_html(
 ) -> str:
     """Clickable stickers. No table, so GitHub draws no grid."""
     if not people:
-        return ""
+        return f"<p>{_xml(EMPTY_WALL)}</p>\n"
     cards = []
     prefix = faces_href.rstrip("/")
     for index, person in enumerate(people):
@@ -876,7 +1192,8 @@ def render_html(
             src = f"https://avatars.githubusercontent.com/{login}?s={face * 2}"
             height = face
         cards.append(
-            f'<a href="https://github.com/{login}" title="{name}">'
+            f'<a href="https://github.com/{login}" title="{name}" '
+            f'aria-label="{name}">'
             f'<img src="{src}" width="{face}" height="{height}" alt="{name}" />'
             "</a>"
         )
@@ -902,11 +1219,25 @@ def render_wall(
     size: int = 72,
     format: str = "svg",
     faces_href: str = "",
+    caption: str = "",
 ) -> str:
     # GitHub renders <img src="*.svg"> as one picture. The README wall is
     # one polaroid <a><img></a> per person so every face stays a link.
+    # From 12 people up, also print names so a small face still has credit.
     _ = (svg_href, svg_width, format)
-    return render_html(people, size=size, faces_href=faces_href)
+    count = len(people)
+    if not people:
+        html = f"<p>{_xml(EMPTY_WALL)}</p>\n"
+    else:
+        html = render_html(
+            people, size=fit_readme_size(count, size), faces_href=faces_href
+        )
+        if count >= 12:
+            html += render_names(people)
+    line = (caption or "").strip()
+    if line:
+        html += f'<p align="center"><em>{_xml(line)}</em></p>\n'
+    return html
 
 
 def svg_width(
@@ -915,26 +1246,62 @@ def svg_width(
     columns: int,
     layout: str = "facepile",
     theme: str = "auto",
+    overlap: float = 0.64,
 ) -> int:
     if not people:
         return 1
-    layout = parse_layout(layout)
+    layout = fit_layout(layout, len(people))
     theme_name = parse_theme(theme)
     framed = bool(THEMES[theme_name].get("bg"))
     width, _height, _spots = _placements(
-        layout, len(people), size, columns, framed
+        layout, len(people), size, columns, framed, overlap
     )
     return width
+
+
+def _fence_spans(text: str) -> list[tuple[int, int]]:
+    """Byte offsets of fenced code blocks (``` ... ```)."""
+    spans: list[tuple[int, int]] = []
+    in_fence = False
+    start = 0
+    idx = 0
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            if not in_fence:
+                in_fence = True
+                start = idx
+            else:
+                spans.append((start, idx + len(line)))
+                in_fence = False
+        idx += len(line)
+    return spans
+
+
+def _in_span(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(lo <= pos < hi for lo, hi in spans)
 
 
 def apply_readme(text: str, block: str) -> str:
     start = _start()
     end = _end()
-    if start not in text or end not in text:
-        raise SystemExit(f"README is missing {start} / {end}")
-    before, rest = text.split(start, 1)
-    _, after = rest.split(end, 1)
-    return f"{before}{start}\n{block}{end}{after}"
+    fences = _fence_spans(text)
+    pos = 0
+    while True:
+        i = text.find(start, pos)
+        if i < 0:
+            break
+        j = text.find(end, i + len(start))
+        if j < 0:
+            break
+        if not _in_span(i, fences):
+            return f"{text[:i]}{start}\n{block}{end}{text[j + len(end):]}"
+        pos = i + len(start)
+    raise SystemExit(
+        "README is missing markers.\n\n"
+        "Example comments to paste into your README:\n"
+        f"{start}\n"
+        f"{end}"
+    )
 
 
 def _emit(name: str, value: str) -> None:
@@ -952,6 +1319,262 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _post_json(url: str, token: str, payload: dict) -> object:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "readme-contributors-action",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def model_settings() -> tuple[str, str, str] | None:
+    name = os.environ.get("MODEL", "").strip()
+    key = os.environ.get("MODEL_API_KEY", "").strip()
+    base = os.environ.get("MODEL_BASE_URL", "").strip().rstrip("/")
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    low = name.lower()
+    githubish = (
+        "models.github.ai" in base
+        or "models.inference.ai.azure.com" in base
+        or low in {"github", "github-models"}
+    )
+    if githubish:
+        if not (key or token):
+            return None
+        model = (
+            name if name and low not in {"github", "github-models"} else "openai/gpt-4o-mini"
+        )
+        return (key or token, model, base or GITHUB_MODELS_URL)
+    if not key:
+        return None
+    return (key, name or "gpt-4o-mini", base or "https://api.openai.com/v1")
+
+
+def _is_grated(text: str) -> bool:
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+    return not any(word in low for word in _UNSAFE)
+
+
+_STOCK_CAPTION = (
+    "showcases the",
+    "dedicated individuals",
+    "dedicated people",
+    "valued contributors",
+    "amazing contributors",
+    "this contributors wall",
+    "contributors wall showcases",
+)
+
+
+def _project_name(repo: str) -> str:
+    raw = (repo or "").strip()
+    if "/" in raw:
+        return raw.split("/", 1)[1]
+    return raw
+
+
+def caption_needles(people: list[dict[str, str]], repo: str) -> set[str]:
+    found: set[str] = set()
+    raw = (repo or "").strip()
+    if raw:
+        found.add(raw.lower())
+    project = _project_name(raw)
+    if project:
+        found.add(project.lower())
+    if "/" in raw:
+        owner = raw.split("/", 1)[0].strip()
+        if owner:
+            found.add(owner.lower())
+    for person in people:
+        login = str(person.get("login") or "").strip()
+        name = str(person.get("name") or "").strip()
+        if login:
+            found.add(login.lower())
+        if name:
+            found.add(name.lower())
+            for part in name.replace("-", " ").split():
+                if len(part) >= 2:
+                    found.add(part.lower())
+    return {item for item in found if item}
+
+
+def caption_is_specific(
+    line: str, people: list[dict[str, str]], repo: str
+) -> bool:
+    text = (line or "").strip()
+    if not _is_grated(text):
+        return False
+    if len(text) < 12 or len(text) > 180:
+        return False
+    low = text.lower()
+    if any(stock in low for stock in _STOCK_CAPTION):
+        return False
+    needles = caption_needles(people, repo)
+    if not needles:
+        return False
+    return any(needle in low for needle in needles)
+
+
+def marked_block(text: str) -> str:
+    start = _start()
+    end = _end()
+    fences = _fence_spans(text)
+    pos = 0
+    while True:
+        i = text.find(start, pos)
+        if i < 0:
+            return ""
+        j = text.find(end, i + len(start))
+        if j < 0:
+            return ""
+        if not _in_span(i, fences):
+            return text[i + len(start) : j]
+        pos = i + len(start)
+
+
+def existing_caption(block: str) -> str:
+    match = _CAPTION_EM.search(block or "")
+    if not match:
+        return ""
+    return html.unescape(match.group(1)).strip()
+
+
+def wall_logins(block: str) -> set[str]:
+    found: set[str] = set()
+    for raw in _WALL_HREF.findall(block or ""):
+        login = html.unescape(raw).strip().lower()
+        if login:
+            found.add(login)
+    return found
+
+
+def people_logins(people: list[dict[str, str]]) -> set[str]:
+    found: set[str] = set()
+    for person in people:
+        login = str(person.get("login") or "").strip().lower()
+        if login:
+            found.add(login)
+    return found
+
+
+def roster_matches(people: list[dict[str, str]], block: str) -> bool:
+    return people_logins(people) == wall_logins(block)
+
+
+def resolve_caption(
+    people: list[dict[str, str]], repo: str, readme: str = ""
+) -> str:
+    wanted = os.environ.get("CAPTION", "").strip()
+    if wanted.lower() != "auto":
+        return wanted
+    if not people:
+        return ""
+    if readme:
+        block = marked_block(readme)
+        if roster_matches(people, block):
+            line = existing_caption(block)
+            if caption_is_specific(line, people, repo):
+                print("caption reused", file=sys.stderr)
+                return line
+    return ask_caption(people, repo)
+
+
+def ask_caption(people: list[dict[str, str]], repo: str = "") -> str:
+    wanted = os.environ.get("CAPTION", "").strip()
+    if wanted.lower() != "auto":
+        return wanted
+    if not people:
+        return ""
+    cfg = model_settings()
+    if not cfg:
+        return ""
+    key, model, base = cfg
+    project = _project_name(repo) or "this repository"
+    roster = [
+        {
+            "login": str(person.get("login") or ""),
+            "name": str(person.get("name") or person.get("login") or ""),
+        }
+        for person in people[:8]
+    ]
+    system = (
+        "Write one muted G-rated sentence about the people on this "
+        "repository's contributors wall. "
+        'Reply with JSON only: {"caption": "<one sentence>"}. '
+        "Name the project. You may name people from the list. "
+        "Never invent names or facts. Do not write stock lines about "
+        "showcasing dedicated individuals. No slurs, no adult content."
+    )
+    try:
+        data = _post_json(
+            f"{base.rstrip('/')}/chat/completions",
+            key,
+            {
+                "model": model,
+                "temperature": 0,
+                "max_tokens": 80,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "repository": repo,
+                                "project": project,
+                                "count": len(people),
+                                "people": roster,
+                            }
+                        ),
+                    },
+                ],
+            },
+        )
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        print(f"caption skipped: {exc}", file=sys.stderr)
+        return ""
+    content = ""
+    if isinstance(data, dict):
+        choices = data.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                content = str(message.get("content") or "")
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return ""
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return ""
+    if not isinstance(payload, dict):
+        return ""
+    line = str(payload.get("caption") or "").strip()
+    if not caption_is_specific(line, people, repo):
+        print("caption skipped: generic or unsafe", file=sys.stderr)
+        return ""
+    print(f"caption: {line}", file=sys.stderr)
+    return line
+
+
 def main() -> int:
     root = _root()
     readme = root / os.environ.get("README_PATH", "README.md")
@@ -966,13 +1589,19 @@ def main() -> int:
     fmt = os.environ.get("FORMAT", "svg").strip().lower() or "svg"
     columns = _int_env("COLUMNS", 8)
     size = _int_env("AVATAR_SIZE", 72)
-    limit = _int_env("MAX_PEOPLE", 48)
-    layout = parse_layout(os.environ.get("LAYOUT", "facepile"))
+    overlap = parse_overlap(os.environ.get("OVERLAP", ""))
+    limit = _int_env("MAX_PEOPLE", 100)
+    if limit <= 0:
+        limit = 500
+    wanted_layout = os.environ.get("LAYOUT", "auto")
     theme = parse_theme(os.environ.get("THEME", "auto"))
     check = os.environ.get("CHECK", "").strip().lower() in {"1", "true", "yes"}
     if not repo:
         raise SystemExit("GITHUB_REPOSITORY is required (owner/name)")
-    people = list_people(repo, token, limit)
+    people = list_people(
+        repo, token, limit, exclude=os.environ.get("EXCLUDE", "")
+    )
+    layout = fit_layout(wanted_layout, len(people))
     faces_dir = root / os.environ.get("FACES_PATH", ".github/faces")
     avatars: dict[str, bytes] = fetch_avatars(people, token, size) if people else {}
     href = ""
@@ -986,14 +1615,18 @@ def main() -> int:
             columns=columns,
             layout=layout,
             theme=theme,
+            overlap=overlap,
         )
         href = Path(os.path.relpath(svg_path, start=readme.parent)).as_posix()
         if not href.startswith("."):
             href = f"./{href}"
-        width = svg_width(people, size, columns, layout=layout, theme=theme)
+        width = svg_width(
+            people, size, columns, layout=layout, theme=theme, overlap=overlap
+        )
     faces_href = Path(os.path.relpath(faces_dir, start=readme.parent)).as_posix()
     if not faces_href.startswith("."):
         faces_href = f"./{faces_href}"
+    readme_text = readme.read_text(encoding="utf-8")
     block = render_wall(
         people,
         svg_href=href,
@@ -1001,8 +1634,9 @@ def main() -> int:
         size=size,
         format=fmt,
         faces_href=faces_href,
+        caption=resolve_caption(people, repo, readme_text),
     )
-    updated = apply_readme(readme.read_text(encoding="utf-8"), block)
+    updated = apply_readme(readme_text, block)
     same_readme = updated == readme.read_text(encoding="utf-8")
     same_svg = True
     if fmt == "svg":

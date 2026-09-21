@@ -1,28 +1,39 @@
 # README contributors
 
 [![CI](https://github.com/YauhenBichel/readme-contributors/actions/workflows/ci.yml/badge.svg)](https://github.com/YauhenBichel/readme-contributors/actions/workflows/ci.yml)
+[![Contributors](https://img.shields.io/github/contributors/YauhenBichel/readme-contributors)](https://github.com/YauhenBichel/readme-contributors/graphs/contributors)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
-[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-v1.5.1-6e5494)](https://github.com/marketplace/actions/readme-contributors)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-v1.7.0-6e5494)](https://github.com/marketplace/actions/readme-contributors)
 [![Examples](https://img.shields.io/badge/examples-GitHub%20Pages-0969da)](https://yauhenbichel.github.io/readme-contributors/)
-Marketplace: [readme-contributors](https://github.com/marketplace/actions/readme-contributors) · Site: [yauhenbichel.github.io/readme-contributors](https://yauhenbichel.github.io/readme-contributors/)
-
 [![good first issue](https://img.shields.io/github/issues/YauhenBichel/readme-contributors/good%20first%20issue)](https://github.com/YauhenBichel/readme-contributors/labels/good%20first%20issue)
+
+Marketplace: [readme-contributors](https://github.com/marketplace/actions/readme-contributors) · Site: [yauhenbichel.github.io/readme-contributors](https://yauhenbichel.github.io/readme-contributors/)
 
 A **GitHub Action** that draws a **contributors** wall into your
 **README**: one clickable **polaroid sticker** per person (face plus
 name), plus SVG layouts for Pages (facepile, stickers, grid, tiles,
 orbit, honeycomb, and more). It reads the GitHub contributors API,
-omits bots, and replaces a pair of HTML markers. No `<table>`, so
-GitHub does not draw a grid. No third-party list service.
+adds the person who just landed and merged pull request authors
+(plus `Co-authored-by` trailers on those PRs) when that list is
+behind, omits bots, honors `exclude`, and replaces a pair of HTML
+markers. An empty wall writes “Be the first to appear here.”
+No `<table>`, so GitHub does not draw a grid. No third-party list
+service.
 
 [![18s demo](./docs/media/readme-contributors-demo.gif)](https://yauhenbichel.github.io/readme-contributors/#demo)
 
 ## What
 
-A **GitHub Action** that fills a README with the people who actually
-committed. Each person is a **polaroid**: face, name, a bit of tilt.
-Each card is its own link. Bots are omitted. No `<table>`. No
-third-party list service.
+A **GitHub Action** that fills a README with the people the GitHub
+contributors API lists (plus merged-PR authors when that list is
+behind). Each person is a **polaroid**: face, name, a bit of tilt.
+Each card is its own link. Bots are omitted. `exclude` drops named
+logins. Merged PR `Co-authored-by` trailers join the wall (GitHub noreply
+addresses only, up to five per pull request). An empty
+list writes “Be the first to appear here.” Hover a cut name to see
+the full one. `caption: auto` asks a model for one sentence that
+names this repository or the people on the wall; stock “dedicated
+individuals” lines are dropped. No `<table>`. No third-party list service.
 
 Watch the 18s demo (GitHub README plays this as a GIF; the MP4 is on
 [Pages](https://yauhenbichel.github.io/readme-contributors/#demo)):
@@ -49,10 +60,12 @@ GitHub profile.
 2. Call the Action. Pin the tag to read. Pin the SHA if the job can write:
 
 ```yaml
-- uses: YauhenBichel/readme-contributors@635c6ff57a4c155e285b6efa75df3c3b0da7f1df # v1.5.1
+- uses: YauhenBichel/readme-contributors@06d127a2e5ea32a9d8d6c4a00944d14cf6ea239e # v1.7.0
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     format: html
+    # exclude: ghost
+    # caption: auto
 ```
 
 3. Commit the rewritten README and `.github/faces`.
@@ -83,13 +96,14 @@ other repositories get.
 
 <!-- demo: live -start -->
 <p align="center">
-  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
-  <a href="https://github.com/xianjianlf2" title="Mark Xian"><img src=".github/faces/xianjianlf2.svg" width="66" height="75" alt="Mark Xian" /></a>
-  <a href="https://github.com/ItzSaurav" title="Itzsaurav"><img src=".github/faces/ItzSaurav.svg" width="72" height="82" alt="Itzsaurav" /></a>
-  <a href="https://github.com/svkzn" title="svkzn"><img src=".github/faces/svkzn.svg" width="80" height="91" alt="svkzn" /></a>
-  <a href="https://github.com/Aditya-233" title="Aditya"><img src=".github/faces/Aditya-233.svg" width="63" height="72" alt="Aditya" /></a>
-  <a href="https://github.com/kkkhs" title="Huangshuo Kuang"><img src=".github/faces/kkkhs.svg" width="76" height="87" alt="Huangshuo Kuang" /></a>
+  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel" aria-label="Yauhen Bichel"><img src="./docs/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
+  <a href="https://github.com/xianjianlf2" title="Mark Xian" aria-label="Mark Xian"><img src="./docs/faces/xianjianlf2.svg" width="66" height="75" alt="Mark Xian" /></a>
+  <a href="https://github.com/ItzSaurav" title="Itzsaurav" aria-label="Itzsaurav"><img src="./docs/faces/ItzSaurav.svg" width="72" height="82" alt="Itzsaurav" /></a>
+  <a href="https://github.com/svkzn" title="svkzn" aria-label="svkzn"><img src="./docs/faces/svkzn.svg" width="80" height="91" alt="svkzn" /></a>
+  <a href="https://github.com/Aditya-233" title="Aditya" aria-label="Aditya"><img src="./docs/faces/Aditya-233.svg" width="63" height="72" alt="Aditya" /></a>
+  <a href="https://github.com/kkkhs" title="Huangshuo Kuang" aria-label="Huangshuo Kuang"><img src="./docs/faces/kkkhs.svg" width="76" height="87" alt="Huangshuo Kuang" /></a>
 </p>
+<p align="center"><em>The contributors to the py-harness project include Yauhen Bichel, Mark Xian, Itzsaurav, svkzn, Aditya, and Huangshuo Kuang.</em></p>
 <!-- demo: live -end -->
 
 Examples for every layout live on the
@@ -114,9 +128,13 @@ source of truth.
 
 ## Layouts
 
-Set `layout`. The default stays the overlapping facepile. The README
-wall is always the clickable polaroids; `layout` changes the SVG
-drawn for Pages.
+Set `layout`. The default is `auto`: **facepile** up to 8 people,
+**grid** up to 24, **compact** after that. The README wall is always
+clickable polaroids. Faces shrink at 20 and 50 people so the row still
+wraps. From 12 people up, a name list sits under the faces so every
+person stays a link. `max` defaults to 100 (set `0` for up to 500).
+Contributor and closed-PR lists are paged up to that cap.
+`layout` still changes the SVG drawn for Pages.
 
 **stickers** — tilted cards with a chunky ring and a drop shadow.
 
@@ -185,7 +203,7 @@ drawn for Pages.
 </p>
 
 ```yaml
-- uses: YauhenBichel/readme-contributors@v1.5.1
+- uses: YauhenBichel/readme-contributors@v1.7.0
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     layout: tiles
@@ -209,7 +227,7 @@ others paint a frame so the wall stays the same in both.
 </p>
 
 ```yaml
-- uses: YauhenBichel/readme-contributors@v1.5.1
+- uses: YauhenBichel/readme-contributors@v1.7.0
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     layout: facepile
@@ -229,9 +247,6 @@ Add markers to your README:
 Thank you to everyone who has helped.
 
 <!-- readme: contributors,bots/- -start -->
-<p align="center">
-  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
-</p>
 <!-- readme: contributors,bots/- -end -->
 ```
 
@@ -254,11 +269,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: YauhenBichel/readme-contributors@635c6ff57a4c155e285b6efa75df3c3b0da7f1df # v1.5.1
+      - uses: YauhenBichel/readme-contributors@06d127a2e5ea32a9d8d6c4a00944d14cf6ea239e # v1.7.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # layout: tiles
           # theme: midnight
+          # caption: auto
+          # model: gpt-4o-mini
+          # model-api-key: ${{ secrets.OPENAI_API_KEY }}
       - run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
@@ -268,10 +286,68 @@ jobs:
           git push
 ```
 
-A copy-paste workflow that opens a pull request on a protected default
-branch is in [examples/contributors.yml](./examples/contributors.yml).
+For every repository, including one with a protected default branch, copy
+[examples/contributors.yml](./examples/contributors.yml). It calls the
+reusable wall, which writes straight to the default branch after each merge —
+no separate pull request. On a protected branch, add a write deploy key,
+store it as `CONTRIBUTORS_DEPLOY_KEY`, and let deploy keys bypass the ruleset.
+If your repository is not under `YauhenBichel`, `secrets: inherit` will not reach
+the wall — GitHub only passes inherited secrets within one organisation — so pass
+the key by name: `secrets: { CONTRIBUTORS_DEPLOY_KEY: ${{ secrets.CONTRIBUTORS_DEPLOY_KEY }} }`.
+Do not run the wall on `pull_request`: a wall drawn on a pull request branch is
+stale by the time it merges if anything else merged first.
 The Action only writes files in the workspace. Your workflow decides
-whether to commit them.
+whether to commit them. The full case list is on the
+[site](https://yauhenbichel.github.io/readme-contributors/#cases).
+
+### Use a model
+
+The wall stays rule-based. Add repository secret `OPENAI_API_KEY` and
+copy [examples/contributors-openai.yml](./examples/contributors-openai.yml).
+
+[![AI demo](./docs/media/readme-contributors-ai-demo.gif)](https://yauhenbichel.github.io/readme-contributors/#ai)
+
+21 seconds. The people stay. The model adds one sentence.
+
+This is the model path. Zero-config leaves the wall with no caption.
+
+**What.** The wall is still the people the contributors API lists. The
+model writes one italic line that names this repository or those
+people.
+
+**Why.** A headcount is not a story. A caption that says who showed
+up is.
+
+**How.** `caption: auto` and `gpt-4o-mini`. Same people next week?
+The line is reused. No extra credits.
+
+Live on this README:
+
+- *The contributors to the py-harness project include Yauhen Bichel, Mark Xian, Itzsaurav, svkzn, Aditya, and Huangshuo Kuang.*
+- *Yauhen Bichel and HeaTTap have contributed to the readme-contributors project.*
+
+```yaml
+- uses: YauhenBichel/readme-contributors@e4468b5b0cc0f8b87f0b083bc13efc9289ff7ecd
+  with:
+    token: ${{ secrets.GITHUB_TOKEN }}
+    caption: auto
+    model: gpt-4o-mini
+    model-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+Pin that SHA until the next release. `@v1.7.0` can call a model but
+only sees a headcount. Stock “dedicated individuals” lines are
+dropped. A missing key or a 429 leaves no caption — it is not
+retried.
+
+### Keep credits low
+
+A caption that still names this repository or a listed person is
+reused when the people list is unchanged (no second call). Same
+people plus a missing or stock line gets one call. Use
+`gpt-4o-mini`. One secret, one `caption: auto` step, weekly cron
+only. Do not run `caption: auto` on `push` to `README.md` or the
+wording will refresh itself.
 
 ## Contribute
 
@@ -293,13 +369,19 @@ No token, no GPU, no extra packages. `fill.py` is stdlib only.
 | --- | --- | --- |
 | `readme` | `README.md` | File that holds the markers |
 | `svg` | `.github/contributors.svg` | Generated wall (when `format` is `svg`) |
-| `faces` | `.github/faces` | One polaroid SVG per person |
+| `faces` | `.github/faces` | One polaroid SVG per person. Stale files are removed when a login leaves the wall |
 | `format` | `svg` | README icons always link to profiles; `html` skips the combined SVG file |
-| `layout` | `facepile` | `facepile`, `stickers`, `grid`, `tiles`, `list`, `compact`, `wave`, `orbit`, `honeycomb`, `ribbon`, `constellation`, `banner` |
+| `layout` | `auto` | `auto` picks facepile / grid / compact by count; or pin `facepile`, `stickers`, `grid`, `tiles`, `list`, `compact`, `wave`, `orbit`, `honeycomb`, `ribbon`, `constellation`, `banner` |
 | `theme` | `auto` | `auto`, `github`, `midnight`, `sunrise`, `forest`, `ocean`, `mono` |
 | `columns` | `8` | Faces per row |
 | `avatar-size` | `72` | Face diameter, pixels |
-| `max` | `48` | Cap after bots are omitted |
+| `overlap` | `0.64` | Facepile step as a fraction of `avatar-size`. `1` sits faces side by side. Pages SVG only |
+| `max` | `100` | Cap after bots are omitted. `0` means 500. Contributor and closed-PR lists are paged up to the cap |
+| `exclude` | empty | Comma-separated logins to omit (case-insensitive, after bots) |
+| `caption` | empty | `auto` writes one sentence that names the repo or people when a model key is set. A still-valid line is reused when the people list is unchanged |
+| `model` | empty | Optional OpenAI-compatible chat model for `caption: auto` |
+| `model-api-key` | empty | Optional OpenAI-compatible key |
+| `model-base-url` | empty | Optional OpenAI-compatible API root |
 | `repository` | the current repo | `owner/name` to read |
 | `token` | `github.token` | Raises the API rate limit |
 | `check` | `false` | Exit 1 if the files would change |
@@ -327,8 +409,10 @@ Thank you to everyone who has helped this Action.
 
 <!-- readme: contributors,bots/- -start -->
 <p align="center">
-  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
+  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel" aria-label="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
+  <a href="https://github.com/HeaTTap" title="HeaTTap" aria-label="HeaTTap"><img src=".github/faces/HeaTTap.svg" width="66" height="75" alt="HeaTTap" /></a>
 </p>
+<p align="center"><em>Yauhen Bichel and HeaTTap have contributed to the readme-contributors project.</em></p>
 <!-- readme: contributors,bots/- -end -->
 
-Filled from GitHub commits (bots omitted).
+Filled from the GitHub contributors API (bots omitted).
